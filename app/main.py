@@ -2,7 +2,7 @@ import base64
 import os
 from email.message import EmailMessage
 
-from fastapi import Body, FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.odoo_client import (attach_bytes, detect_name_type_from_base64, odoo, odoo_2,
@@ -31,6 +31,38 @@ def create_ticket(client, model, data, extra=None):
     payload.update({key: value for key, value in (extra or {}).items() if key in fields and value is not None})
     ticket_id = client.execute_kw(model, "create", [payload])
     return ticket_id, client.execute_kw(model, "read", [ticket_id], {"fields": ["name"]})[0].get("name", str(ticket_id))
+
+
+@app.get("/api/distritos")
+@app.get("/api/ubicaciones/distritos")
+def listar_distritos(
+    provincia_id: str | None = Query(default=None),
+    provincia: str | None = Query(default=None),
+):
+    """Devuelve los distritos de Odoo para una provincia, por ID o nombre."""
+    value = (provincia_id if isinstance(provincia_id, str) else provincia or "").strip()
+    if not value:
+        raise HTTPException(400, "Envía provincia_id o provincia.")
+    try:
+        if value.isdigit():
+            city_id = int(value)
+        else:
+            cities = odoo.execute_kw("res.city", "name_search", [value], {"operator": "=ilike", "limit": 2})
+            if not cities:
+                raise HTTPException(404, f"No se encontró la provincia: {value}")
+            city_id = cities[0][0]
+        districts = odoo.execute_kw(
+            "l10n_pe.res.city.district", "search_read",
+            [[("city_id", "=", city_id)]],
+            {"fields": ["id", "name", "code"], "order": "name"},
+        )
+        return {"provincia_id": city_id, "distritos": [
+            {"id": row["id"], "nombre": row["name"], "codigo": row.get("code")} for row in districts
+        ]}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(502, f"No fue posible consultar distritos en Odoo: {exc}") from exc
 
 
 def send_pdf(recipient, subject, body, pdf_path, attachment=None, username=None, password=None):
