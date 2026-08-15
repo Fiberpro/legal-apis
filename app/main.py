@@ -74,6 +74,7 @@ def listar_distritos(
 
 @app.get("/api/distritos/{provincia_id}")
 @app.get("/api/ubicaciones/distritos/{provincia_id}")
+@app.get("/api/get_district/{provincia_id}")
 def listar_distritos_por_provincia(provincia_id: str):
     return listar_distritos(provincia_id=provincia_id)
 
