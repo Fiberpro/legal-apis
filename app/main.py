@@ -1,4 +1,5 @@
 import base64
+import logging
 import os
 from email.message import EmailMessage
 
@@ -10,6 +11,7 @@ from app.core.odoo_client import (attach_bytes, detect_name_type_from_base64, od
 from app.pdf_utils import generar_pdf, generar_pdf_osiptel
 
 app = FastAPI(title="API Legal - FiberPro", version="2.1.0")
+logger = logging.getLogger("api_legal")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
                    allow_methods=["*"], allow_headers=["*"])
 
@@ -80,15 +82,20 @@ def listar_distritos_por_provincia(provincia_id: str):
 
 
 def send_pdf(recipient, subject, body, pdf_path, attachment=None, username=None, password=None):
-    username, password = username or settings.MAIL_USERNAME, password if password is not None else settings.MAIL_PASSWORD
-    message = EmailMessage()
-    message["Subject"], message["From"], message["To"] = subject, username, recipient
-    message.set_content(body)
-    with open(pdf_path, "rb") as pdf_file:
-        attach_bytes(message, "Libro_de_Reclamaciones.pdf", "application/pdf", pdf_file.read())
-    if attachment:
-        attach_bytes(message, *attachment)
-    send_smtp_email(message, [recipient], username, password)
+    try:
+        username, password = username or settings.MAIL_USERNAME, password if password is not None else settings.MAIL_PASSWORD
+        message = EmailMessage()
+        message["Subject"], message["From"], message["To"] = subject, username, recipient
+        message.set_content(body)
+        with open(pdf_path, "rb") as pdf_file:
+            attach_bytes(message, "Libro_de_Reclamaciones.pdf", "application/pdf", pdf_file.read())
+        if attachment:
+            attach_bytes(message, *attachment)
+        send_smtp_email(message, [recipient], username, password)
+    except Exception:
+        # No registra contraseñas ni contenido del formulario.
+        logger.exception("No se pudo enviar el correo SMTP")
+        raise
 
 
 def legal_ticket(data, model):
@@ -130,7 +137,22 @@ def crear_libro(data: dict = Body(...)):
 @app.post("/api/libroreclamaciones/v2")
 def crear_libro_v2(data: dict = Body(...)):
     if str(data.get("sedesicalima", "")).strip() != "1": raise HTTPException(400, "Solo se registran reclamos de Lima en Odoo.")
-    return crear_libro(data)
+    pdf_path = None
+    try:
+        _, ticket_name = create_ticket(odoo, "indecopi.complaints", {}, libro_data(data))
+        data["ticket_number"] = ticket_name
+        pdf_path = generar_pdf(data)
+        send_pdf(
+            data["correoelectronico"],
+            "Libro de Reclamaciones INDECOPI - FiberPro - Lima",
+            f"Tu reclamo fue recibido correctamente. Número: {ticket_name}.",
+            pdf_path,
+        )
+        return {"success": True, "ticket_id": ticket_name, "message": "Reclamo registrado y constancia enviada."}
+    except HTTPException: raise
+    except Exception as exc: raise HTTPException(500, str(exc)) from exc
+    finally:
+        if pdf_path and os.path.exists(pdf_path): os.unlink(pdf_path)
 
 
 @app.post("/api/libroreclamaciones/chincha-pisco")
