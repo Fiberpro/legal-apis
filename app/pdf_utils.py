@@ -271,3 +271,41 @@ def generar_pdf(data):
 
     pdf.output(pdf_path)
     return pdf_path
+
+
+def generar_pdf_osiptel(data):
+    """Genera una constancia legible para los formularios OSIPTEL v1 y v2.
+
+    Los formularios han cambiado varias veces; por eso se muestran todos los
+    valores recibidos (incluidos los anidados) sin descartar información.
+    """
+    def flatten(value, prefix=""):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                yield from flatten(item, f"{prefix}{key}." if prefix else f"{key}.")
+        elif isinstance(value, list):
+            yield prefix[:-1], ", ".join(map(str, value))
+        else:
+            yield prefix[:-1], value
+
+    pdf = PDF()
+    pdf.alias_nb_pages()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.set_y(40)
+    pdf.set_font("helvetica", "B", 14)
+    pdf.cell(0, 10, "FORMULARIO OSIPTEL - RECLAMO / QUEJA", ln=True, align="C")
+    pdf.ln(5)
+    for field, value in flatten(data):
+        if value in (None, ""):
+            continue
+        pdf.set_font("helvetica", "B", 10)
+        pdf.multi_cell(0, 6, clean_text(field.replace("_", " ").capitalize() + ":"))
+        pdf.set_font("helvetica", "", 10)
+        pdf.multi_cell(0, 6, clean_text(str(value)))
+        pdf.ln(2)
+
+    os.makedirs("./static/temp", exist_ok=True)
+    pdf_path = os.path.join("./static/temp", f"osiptel_{datetime.now().strftime('%Y%m%d%H%M%S%f')}.pdf")
+    pdf.output(pdf_path)
+    return pdf_path

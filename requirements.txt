@@ -3,3 +3,4 @@ uvicorn[standard]>=0.28.0
 pydantic-settings>=2.2.0
 python-dotenv>=1.0.1
 fpdf>=1.7.2
+Pillow>=10.2.0
