@@ -59,7 +59,11 @@ def listar_distritos(
         # El frontend consume directamente un arreglo para poblar el <select>.
         # Se conserva ``name`` y ``nombre`` para compatibilidad con ambos clientes.
         return [
-            {"id": row["id"], "name": row["name"], "nombre": row["name"], "codigo": row.get("code")}
+            {
+                "id": row["id"], "id_distrito": row["id"], "value": row["id"],
+                "name": row["name"], "nombre": row["name"], "distrito": row["name"],
+                "nombre_distrito": row["name"], "label": row["name"], "codigo": row.get("code"),
+            }
             for row in districts
         ]
     except HTTPException:
