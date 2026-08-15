@@ -65,6 +65,12 @@ def listar_distritos(
         raise HTTPException(502, f"No fue posible consultar distritos en Odoo: {exc}") from exc
 
 
+@app.get("/api/distritos/{provincia_id}")
+@app.get("/api/ubicaciones/distritos/{provincia_id}")
+def listar_distritos_por_provincia(provincia_id: str):
+    return listar_distritos(provincia_id=provincia_id)
+
+
 def send_pdf(recipient, subject, body, pdf_path, attachment=None, username=None, password=None):
     username, password = username or settings.MAIL_USERNAME, password if password is not None else settings.MAIL_PASSWORD
     message = EmailMessage()
