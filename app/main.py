@@ -141,18 +141,27 @@ def crear_libro_v2(data: dict = Body(...)):
     try:
         _, ticket_name = create_ticket(odoo, "indecopi.complaints", {}, libro_data(data))
         data["ticket_number"] = ticket_name
+    except HTTPException: raise
+    except Exception as exc: raise HTTPException(500, f"Error registrando en Odoo: {exc}") from exc
+    try:
         pdf_path = generar_pdf(data)
+    except Exception as exc: raise HTTPException(500, f"Error generando PDF: {exc}") from exc
+    try:
         send_pdf(
             data["correoelectronico"],
             "Libro de Reclamaciones INDECOPI - FiberPro - Lima",
             f"Tu reclamo fue recibido correctamente. Número: {ticket_name}.",
             pdf_path,
         )
-        return {"success": True, "ticket_id": ticket_name, "message": "Reclamo registrado y constancia enviada."}
-    except HTTPException: raise
-    except Exception as exc: raise HTTPException(500, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(500, f"Error enviando correo SMTP: {exc}") from exc
     finally:
         if pdf_path and os.path.exists(pdf_path): os.unlink(pdf_path)
+    return {"success": True, "ticket_id": ticket_name, "message": "Reclamo registrado y constancia enviada."}
+    #except HTTPException: raise
+    #except Exception as exc: raise HTTPException(500, str(exc)) from exc
+    # finally:
+    #     if pdf_path and os.path.exists(pdf_path): os.unlink(pdf_path)
 
 
 @app.post("/api/libroreclamaciones/chincha-pisco")
