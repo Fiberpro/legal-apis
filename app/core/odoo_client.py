@@ -4,6 +4,8 @@ import io
 import base64
 import mimetypes
 import xmlrpc.client
+import socket
+import smtplib
 from datetime import datetime
 from email.message import EmailMessage
 from email.utils import formataddr
@@ -177,9 +179,21 @@ def send_smtp_email(email_message: EmailMessage, recipients: list, username: str
 
     if not email_message.get("To"):
         email_message["To"] = ", ".join(recipients)
+    
+    host = settings.MAIL_SERVER
+    port = settings.MAIL_PORT
+    
+    try:
+        infos = socket.getaddrinfo(host, port, socket.AF_INET,
+                                   socket.SOCK_STREAM)
+        if not infos:
+            raise OSError(f"No se pudo resolver {host}:{port} por IPv4")
+        host_to_connect = infos[0][4][0]
+    except socket.gaierror:
+        host_to_connect = host
 
     smtp_class = smtplib.SMTP_SSL if settings.MAIL_USE_SSL else smtplib.SMTP
-    with smtp_class(settings.MAIL_SERVER, settings.MAIL_PORT, timeout=30) as smtp:
+    with smtp_class(host_to_connect, port, timeout=30) as smtp:
         if settings.MAIL_USE_TLS and not settings.MAIL_USE_SSL:
             smtp.starttls()
         smtp.login(username, password)
