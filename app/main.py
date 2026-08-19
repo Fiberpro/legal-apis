@@ -8,7 +8,7 @@ from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.odoo_client import (attach_bytes, detect_name_type_from_base64, odoo, odoo_2,
-                                  resolve_many2one_value, send_smtp_email, settings, validate_date)
+                                  resolve_many2one_value, send_smtp_email, settings, validate_date, clean_base64)
 from app.pdf_utils import generar_pdf, generar_pdf_osiptel
 
 app = FastAPI(title="API Legal - FiberPro", version="2.1.0")
@@ -33,9 +33,64 @@ def create_ticket(client, model, data, extra=None):
                     if target in fields and data.get(source) is not None})
     payload.update({key: value for key, value in (extra or {}).items() if key in fields and value is not None})
     
+    # Extraemos y limpiamos el base64
+    pruebas_b64 = data.get("pruebas") or (extra or {}).get("pruebas")
+    if isinstance(pruebas_b64, str) and "," in pruebas_b64:
+        pruebas_b64 = pruebas_b64.split(",", 1)[-1]
+    
+    # Quitamos del payload para evitar problemas durante el create
+    payload.pop("pruebas", None)
+    
+    # 1. Creamos el ticket SIN el archivo
     ticket_id = client.execute_kw(model, "create", [payload])
-    return ticket_id, client.execute_kw(model, "read", [ticket_id], {"fields": ["name"]})[0].get("name", str(ticket_id))
+    
+    # 2. Adjuntamos el archivo bypassando external_attachment_storage
+    if pruebas_b64 and ticket_id:
+        try:
+            # Detectar nombre y mimetype
+            name, mime = detect_name_type_from_base64(pruebas_b64)
+            
+            # --- PASO A: Eliminar attachments previos de este campo (si existen) ---
+            existing = client.execute_kw("ir.attachment", "search", [
+                [("res_model", "=", model), ("res_id", "=", ticket_id), ("res_field", "=", "pruebas")]
+            ])
+            if existing:
+                client.execute_kw("ir.attachment", "unlink", [existing])
+            
+            # --- PASO B: Crear attachment HUÉRFANO (sin res_model/res_id) ---
+            # El módulo external_attachment_storage ignora attachments sin res_id
+            attachment_id = client.execute_kw("ir.attachment", "create", [{
+                "name": name,
+                "type": "binary",
+                "datas": pruebas_b64,
+                "mimetype": mime,
+            }])
+            
+            # --- PASO C: Vincular al registro con skip_external_sync=True ---
+            # El write del módulo SÍ respeta este contexto y NO sube a external
+            client.execute_kw(
+                "ir.attachment",
+                "write",
+                [[attachment_id], {
+                    "res_model": model,
+                    "res_id": ticket_id,
+                    "res_field": "pruebas",
+                }],
+                {"context": {"skip_external_sync": True}}
+            )
+            
+            # Verificación
+            check = client.execute_kw(model, "read", [[ticket_id]], {"fields": ["pruebas"]})[0]
+            has_file = bool(check.get("pruebas"))
+            print(f"pruebas guardado: {has_file}", flush=True)
+            logger.info(f"✅ Archivo adjuntado al ticket {ticket_id}: {has_file}")
+            
+        except Exception as e:
+            print(f"ERROR write pruebas: {e}", flush=True)
+            logger.error(f"❌ Error al adjuntar archivo en Odoo: {e}", exc_info=True)
+            raise HTTPException(500, f"Error guardando archivo: {e}")
 
+    return ticket_id, client.execute_kw(model, "read", [[ticket_id]], {"fields": ["name"]})[0].get("name", str(ticket_id))
 
 @app.get("/api/distritos")
 @app.get("/api/ubicaciones/distritos")
@@ -122,7 +177,6 @@ def crear_apelacion(data: dict = Body(...)): return legal_ticket(data, "apelacio
 def libro_data(data):
     require(data, ["tipo", "tipodocumento", "numerodocumento", "nombrescompletos", "apellidoscompletos", "correoelectronico", "materiareclamable", "productos", "precio", "detalle", "pedido"])
     
-    # Limpiar el base64 para Odoo (Odoo necesita el base64 puro, sin "data:image/png;base64,")
     pruebas_b64 = data.get("pruebas")
     if pruebas_b64 and isinstance(pruebas_b64, str) and "," in pruebas_b64:
         pruebas_b64 = pruebas_b64.split(",", 1)[-1]
@@ -148,7 +202,7 @@ def libro_data(data):
         "monto_producto_reclamo": data.get("precio"), 
         "especifique_incoveniente": data.get("detalle"), 
         "pedido_concreto_consumidor": data.get("pedido"), 
-        "pruebas": pruebas_b64  # Odoo lo recibirá nativamente gracias a que es tipo binary
+        "pruebas": pruebas_b64
     }
 
 
@@ -174,7 +228,6 @@ def crear_libro_v2(data: dict = Body(...)):
         pdf_path = generar_pdf(data)
     except Exception as exc: raise HTTPException(500, f"Error generando PDF: {exc}") from exc
     try:
-        # Adjuntar archivo al correo también para Lima
         attachment = None
         if data.get("pruebas"):
             raw = data["pruebas"].split(",", 1)[-1]
@@ -186,7 +239,7 @@ def crear_libro_v2(data: dict = Body(...)):
             "Libro de Reclamaciones INDECOPI - FiberPro - Lima",
             f"Tu reclamo fue recibido correctamente. Número: {ticket_name}.",
             pdf_path,
-            attachment=attachment  # <--- Se agregó el adjunto
+            attachment=attachment
         )
     except Exception as exc:
         raise HTTPException(500, f"Error enviando correo SMTP: {exc}") from exc
