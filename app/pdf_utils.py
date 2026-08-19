@@ -3,6 +3,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 import os, tempfile
 
+ZoneInfo("America/Lima")
+
 # --- LIMPIAR TEXTO ---
 def clean_text(txt):
     if not txt:

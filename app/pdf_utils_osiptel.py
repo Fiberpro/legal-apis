@@ -1,7 +1,10 @@
 from fpdf import FPDF
 import tempfile
 import os
+from zoneinfo import ZoneInfo
 from datetime import datetime
+
+ZoneInfo("America/Lima")
 
 # --- LIMPIAR TEXTO ---
 def clean_text(txt):
