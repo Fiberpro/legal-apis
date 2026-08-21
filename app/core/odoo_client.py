@@ -1,6 +1,7 @@
 import smtplib
 import os
 import io
+import logging
 import base64
 import mimetypes
 import xmlrpc.client
@@ -8,11 +9,17 @@ import socket
 import smtplib
 import xmlrpc.client
 import re
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail, Email, From, To, Content, Attachment, FileContent, FileName, FileType, Disposition, MimeType
 from datetime import datetime
 from email.message import EmailMessage
+from typing import Optional, List
 from email.utils import formataddr
 from PIL import Image
+from app.core.config import settings
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
 
 # --- Configuración de Variables de Entorno ---
 class Settings(BaseSettings):
@@ -227,33 +234,156 @@ def attach_bytes(email_message: EmailMessage, filename: str, content_type: str, 
         filename=filename
     )
 
-def send_smtp_email(email_message: EmailMessage, recipients: list, username: str, password: str, sender_name: str = ""):
-    if not username or not password:
-        raise ValueError("Credenciales SMTP no configuradas.")
+def _parse_addresses(header_value: Optional[str]) -> List[str]:
+    if not header_value:
+        return []
+    addresses = []
+    for part in header_value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "<" in part and ">" in part:
+            email = part.split("<", 1)[1].split(">", 1)[0].strip()
+        else:
+            email = part
+        if email:
+            addresses.append(email)
+    return addresses
 
-    if sender_name:
-        email_message["From"] = formataddr((sender_name, username))
-    elif not email_message.get("From"):
-        email_message["From"] = username
+def _extract_body(msg: EmailMessage) -> tuple[str, str]:
+    plain = ""
+    html = ""
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.is_multipart():
+                continue
+            ctype = part.get_content_type()
+            disposition = part.get_content_disposition()
+            if disposition == "attachment":
+                continue
+            try:
+                payload = part.get_content()
+            except Exception:
+                payload = part.get_payload(decode=True)
+                if isinstance(payload, bytes):
+                    payload = payload.decode(part.get_content_charset() or "utf-8", errors="replace")
+            if ctype == "text/plain" and not plain:
+                plain = payload
+            elif ctype == "text/html" and not html:
+                html = payload
+    else:
+        try:
+            payload = msg.get_content()
+        except Exception:
+            payload = msg.get_payload(decode=True)
+            if isinstance(payload, bytes):
+                payload = payload.decode(msg.get_content_charset() or "utf-8", errors="replace")
+        ctype = msg.get_content_type()
+        if ctype == "text/html":
+            html = payload
+        else:
+            plain = payload
+    if not html and not plain:
+        plain = "(mensaje sin cuerpo)"
+    return plain, html
 
-    if not email_message.get("To"):
-        email_message["To"] = ", ".join(recipients)
-    
-    host = settings.MAIL_SERVER
-    port = settings.MAIL_PORT
-    
+def _build_attachments(msg: EmailMessage) -> List[Attachment]:
+    attachments: List[Attachment] = []
+    for part in msg.iter_attachments():
+        filename = part.get_filename() or "attachment.bin"
+        try:
+            content_bytes = part.get_payload(decode=True)
+            if content_bytes is None:
+                content = part.get_content()
+                if isinstance(content, str):
+                    content_bytes = content.encode("utf-8", errors="replace")
+                else:
+                    content_bytes = bytes(content)
+        except Exception as e:
+            logger.warning(f"No se pudo leer attachment {filename}: {e}")
+            continue
+        if content_bytes is None:
+            continue
+        att = Attachment()
+        att.file_content = base64.b64encode(content_bytes).decode("ascii")
+        att.file_name = filename
+        att.file_type = part.get_content_type() or "application/octet-stream"
+        att.disposition = "attachment"
+        attachments.append(att)
+    return attachments
+
+def send_smtp_email(msg: EmailMessage, *args):
+    if not settings.SENDGRID_API_KEY:
+        logger.error("SENDGRID_API_KEY no configurada.")
+        return False
+
+    from_email = settings.FROM_EMAIL or msg["From"]
+    if not from_email:
+        logger.error("No se pudo determinar FROM_EMAIL.")
+        return False
+
+    to_list = _parse_addresses(msg.get("To"))
+    if args and len(args) > 0 and isinstance(args[0], list):
+        to_list.extend(args[0])
+    to_list = list(set(to_list))
+
+    print("DEBUG - Destinatarios finales:", to_list)
+
+    if not to_list:
+        logger.error("Email sin destinatarios (To).")
+        return False
+
+    subject = msg.get("Subject", "(sin asunto)")
+    plain_body, html_body = _extract_body(msg)
+
     try:
-        infos = socket.getaddrinfo(host, port, socket.AF_INET,
-                                   socket.SOCK_STREAM)
-        if not infos:
-            raise OSError(f"No se pudo resolver {host}:{port} por IPv4")
-        host_to_connect = infos[0][4][0]
-    except socket.gaierror:
-        host_to_connect = host
+        from_addr = _parse_addresses(from_email)
+        from_addr_clean = from_addr[0] if from_addr else from_email
 
-    smtp_class = smtplib.SMTP_SSL if settings.MAIL_USE_SSL else smtplib.SMTP
-    with smtp_class(host_to_connect, port, timeout=30) as smtp:
-        if settings.MAIL_USE_TLS and not settings.MAIL_USE_SSL:
-            smtp.starttls()
-        smtp.login(username, password)
-        smtp.send_message(email_message, from_addr=username, to_addrs=recipients)
+        mail = Mail(
+            from_email=From(from_addr_clean),
+            to_emails=[To(addr) for addr in to_list],
+            subject=subject,
+        )
+        if html_body:
+            mail.add_content(Content(MimeType.html, html_body))
+        if plain_body:
+            mail.add_content(Content(MimeType.text, plain_body))
+        if not html_body and not plain_body:
+            mail.add_content(Content(MimeType.text, "(mensaje vacío)"))
+
+        for att in _build_attachments(msg):
+            mail.add_attachment(att)
+
+        cc = _parse_addresses(msg.get("Cc"))
+        if cc:
+            mail.cc = cc
+        bcc = _parse_addresses(msg.get("Bcc"))
+
+        if settings.FROM_EMAIL and settings.FROM_EMAIL not in to_list and settings.FROM_EMAIL not in bcc:
+            bcc.append('settings.FROM_EMAIL')
+
+        if bcc:
+            mail.bcc = bcc
+
+        sg = SendGridAPIClient(settings.SENDGRID_API_KEY)
+        response = sg.send(mail)
+
+        status = getattr(response, "status_code", None)
+        body_resp = getattr(response, "body", b"")
+        if isinstance(body_resp, bytes):
+            try:
+                body_resp = body_resp.decode("utf-8", errors="replace")
+            except Exception:
+                body_resp = str(body_resp)
+
+        if status and 200 <= status < 300:
+            logger.info(f"Email enviado vía SendGrid a {to_list} (status={status})")
+            return True
+        else:
+            logger.error(f"SendGrid respondió status={status} body={body_resp}")
+            return False
+
+    except Exception as e:
+        logger.exception(f"Error enviando email vía SendGrid: {e}")
+        return False

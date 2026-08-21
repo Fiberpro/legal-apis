@@ -2,13 +2,22 @@ import base64
 import logging
 import mimetypes
 import os
+from typing import Optional
 from email.message import EmailMessage
-
 from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.core.odoo_client import (attach_bytes, detect_name_type_from_base64, odoo, odoo_2,
-                                  resolve_many2one_value, send_smtp_email, settings, validate_date, clean_base64)
+from app.core.odoo_client import (clean_base64, attach_bytes, detect_name_type_from_base64, odoo, odoo_2,
+                                  resolve_many2one_value, send_smtp_email, settings as odoo_settings, validate_date)
+from app.core.email_service import send_legal_email
+from app.mappings import (
+    build_odoo_payload,
+    normalize_for_pdf,
+    extract_email_attachments,
+    DATE_FIELDS,
+    REQUIRED_FIELDS,
+)
+from app.pdf_utils_osiptel_v2 import generar_pdf as generar_pdf_osiptel_v2
 from app.pdf_utils import generar_pdf, generar_pdf_osiptel
 
 app = FastAPI(title="API Legal - FiberPro", version="2.1.0")
@@ -19,12 +28,10 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
 DATE_FIELDS = {"fechaEmisionDocumentoIdentidad", "fechaNacimiento", "fechaVencimiento", "fechaEmisionFC", "fechaVencimientoFC", "fechaEstimadaPagoFC", "fechaInicioCalidadI", "fechaIncumplimientos", "fechAproximadaIncumplimiento", "fechaCualPincumplimiento", "fechaEmisionIncumplimineto", "fechavencimientoIncumplimineto", "fechaAproxInfoOmitida", "fechaInicioProblemafs", "fechaReactivarServicio", "fechaPagoPendiente", "fechaSIMCARD", "fechaContratacionServicioInstalacion", "fechaSolicitudTrasladoInstalacion", "fechaContratacionSInstalacion", "fechaSolicitudBaja", "fechaSolicitudSuspensionBaja", "fechaEmisionBaja", "fechaVencimientoBaja", "fechaEmisionContratacion", "fechaVencimientoContratacion", "fechaSolicitudMigracionX", "fechaEmisionMigracionIII", "fechaMovimientoMigracion", "fechaEmisionII", "fechaVencimientoMigracionII", "fechaEmisionMigracion", "fechaVencimientoMigracion", "fechaSolicitudX", "fechaEmisionX", "fechaVencimientoX", "fechaSolicitudFacturacionX"}
 ALIASES = {"tipoUsuario": "tipo_de_usuario", "numeroDocumentIdentidad": "numero_documento_identidad_reclamo", "tipoDocumentoIdentidad": "tipo_documento_identidad", "nombre": "nombre_cliente", "numeroContacto": "nro_contacto", "numDoc": "nro_documento", "distritos": "distrito_cliente", "direccion": "direccion_cliente", "correo": "correo_electronico", "booleanValue": "notificacion_por_correo_electronico", "idReclamo": "materia_reclamable", "idReclamoEscogido": "problema_espec", "empresaOperadora": "empresa_operadora_dsr", "servicioContratado": "servicio_contratado_dsr", "numeroServicioContratado": "nmero_cdigo_servicio_contrato_dsr", "servicioMateriaReclamo": "servicio_materia_de_reclamo", "cartaPoder": "carta_de_poder", "hojaDocumentoAdjuntada": "adjunta_doc_cobro", "adjuntarVinculo": "documento", "vinculoAdjuntarSolicitud": "documento_1", "vinculoSolicitudReclamo": "vinculo_de_documento_adjuntado", "adjuntarSolicitudReclamoCuatro": "vinculo_del_documento_adjuntando", "solicitudBajaReclamo": "vinculo_del_documento_2", "adjuntarVinculoSolicitud": "vinculo_del_documento_1"}
 
-
 def require(data, fields):
     missing = next((field for field in fields if field not in data), None)
     if missing:
         raise HTTPException(400, f"Falta el campo requerido: {missing}")
-
 
 def create_ticket(client, model, data, extra=None):
     fields = client.execute_kw(model, "fields_get", [], {"attributes": ["type"]})
@@ -128,7 +135,6 @@ def listar_distritos(
     except Exception as exc:
         raise HTTPException(502, f"No fue posible consultar distritos en Odoo: {exc}") from exc
 
-
 @app.get("/api/distritos/{provincia_id}")
 @app.get("/api/ubicaciones/distritos/{provincia_id}")
 @app.get("/api/get_district/{provincia_id}")
@@ -151,7 +157,6 @@ def send_pdf(recipient, subject, body, pdf_path, attachment=None, username=None,
         logger.exception("No se pudo enviar el correo SMTP")
         raise
 
-
 def legal_ticket(data, model):
     for field in DATE_FIELDS.intersection(data): data[field] = validate_date(data[field])
     require(data, ["tipoUsuario", "numeroDocumentIdentidad", "nombre", "apellidos", "correo"])
@@ -161,18 +166,14 @@ def legal_ticket(data, model):
     except Exception as exc:
         raise HTTPException(400, f"Error creating ticket: {exc}") from exc
 
-
 @app.post("/api/reclamos/reclamo")
 def crear_reclamo(data: dict = Body(...)): return legal_ticket(data, "reclamosfp")
-
 
 @app.post("/api/reclamos/queja")
 def crear_queja(data: dict = Body(...)): return legal_ticket(data, "quejasfp")
 
-
 @app.post("/api/reclamos/apelaciones")
 def crear_apelacion(data: dict = Body(...)): return legal_ticket(data, "apelacionfp")
-
 
 def libro_data(data):
     require(data, ["tipo", "tipodocumento", "numerodocumento", "nombrescompletos", "apellidoscompletos", "correoelectronico", "materiareclamable", "productos", "precio", "detalle", "pedido"])
@@ -205,7 +206,6 @@ def libro_data(data):
         "pruebas": pruebas_b64
     }
 
-
 @app.post("/api/libroreclamaciones")
 def crear_libro(data: dict = Body(...)):
     try:
@@ -213,7 +213,6 @@ def crear_libro(data: dict = Body(...)):
         return {"ticket_id": ticket_name, "message": "Libro de reclamacion registrado correctamente."}
     except HTTPException: raise
     except Exception as exc: raise HTTPException(400, str(exc)) from exc
-
 
 @app.post("/api/libroreclamaciones/v2")
 def crear_libro_v2(data: dict = Body(...)):
@@ -247,7 +246,6 @@ def crear_libro_v2(data: dict = Body(...)):
         if pdf_path and os.path.exists(pdf_path): os.unlink(pdf_path)
     return {"success": True, "ticket_id": ticket_name, "message": "Reclamo registrado y constancia enviada."}
 
-
 @app.post("/api/libroreclamaciones/chincha-pisco")
 def crear_libro_maxpro(data: dict = Body(...)):
     pdf_path = None
@@ -271,11 +269,9 @@ def crear_libro_maxpro(data: dict = Body(...)):
     finally:
         if pdf_path and os.path.exists(pdf_path): os.unlink(pdf_path)
 
-
 @app.post("/api/enviar_pdf")
 def enviar_pdf(data: dict = Body(...)):
     return enviar_constancia(data, False)
-
 
 def enviar_constancia(data, osiptel=False):
     pdf_path = None
@@ -298,10 +294,8 @@ def enviar_constancia(data, osiptel=False):
     finally:
         if pdf_path and os.path.exists(pdf_path): os.unlink(pdf_path)
 
-
 @app.post("/api/osiptel/ica")
 def osiptel_ica(data: dict = Body(...)): return enviar_constancia(data, True)
-
 
 @app.post("/api/osiptel/ica/v2")
 def osiptel_ica_v2(data: dict = Body(...)):
