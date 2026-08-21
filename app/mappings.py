@@ -80,6 +80,8 @@ RECLAMO_MAP = {
     "fechaSolicitudFacturacionX": "fecha_solicitud_facturacion_x",
     "descargoReclamo": "descargo_reclamo",
     "informacionNecesariaReclamo": "informacion_necesaria_reclamo",
+    "descripcionProblemaSolicitudConcretaReclamo": "descripcion_problema_solicitud_concreta_reclamo",
+    "descripcionProblemaReclamo": "descripcion_problema_solicitud_concreta_reclamo",
     # Archivos
     "adjuntarVinculoSolicitud": "vinculo_del_documento_adjuntando",
     "adjuntarVinculo": "documento",

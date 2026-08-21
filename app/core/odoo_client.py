@@ -386,8 +386,4 @@ def send_smtp_email(msg: EmailMessage, *args):
 
     except Exception as e:
         logger.exception(f"Error enviando email vía SendGrid: {e}")
-<<<<<<< HEAD
         return False
-=======
-        return False
->>>>>>> 4e431d4b032a5a5c74b311ffdbc0238e65646cd3
