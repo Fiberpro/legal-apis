@@ -6,5 +6,9 @@ fpdf>=1.7.2
 Pillow>=10.2.0
 tzdata==2024.1
 pytz==2024.1
+<<<<<<< HEAD
 tzdata==2024.1
 pytz==2024.1
+=======
+sendgrid==6.11.0
+>>>>>>> 4e431d4b032a5a5c74b311ffdbc0238e65646cd3
