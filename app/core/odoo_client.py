@@ -198,3 +198,82 @@ def send_smtp_email(message: EmailMessage, recipients: List[str], username: str,
     except Exception as e:
         logger.error(f"Error enviando correo SMTP: {e}")
         raise
+    
+# app/core/odoo_client.py (añadir al final del archivo)
+
+def attach_file_bypass_external(
+    client: OdooClient,
+    model: str,
+    record_id: int,
+    field: str,
+    base64_data: str,
+) -> bool:
+    """
+    Adjunta un archivo a un registro de Odoo sin que external_attachment_storage
+    lo suba a un storage externo.
+
+    Args:
+        client: Instancia de OdooClient
+        model: Nombre del modelo (ej. 'indecopi.complaints')
+        record_id: ID del registro
+        field: Nombre del campo binary (ej. 'pruebas')
+        base64_data: Contenido del archivo en base64 (sin prefijo)
+
+    Returns:
+        bool: True si se adjuntó correctamente, False en caso contrario.
+    """
+    if not base64_data or not record_id:
+        logger.warning("No hay datos o ID válido para adjuntar")
+        return False
+
+    # Limpiar base64 (por si tiene prefijo)
+    if "," in base64_data:
+        base64_data = base64_data.split(",", 1)[-1]
+
+    # Detectar nombre y mimetype
+    name, mime = detect_name_type_from_base64(base64_data, default_name=field)
+
+    try:
+        # --- PASO A: Eliminar attachments previos de este campo ---
+        existing = client.execute_kw(
+            "ir.attachment",
+            "search",
+            [[("res_model", "=", model), ("res_id", "=", record_id), ("res_field", "=", field)]]
+        )
+        if existing:
+            client.execute_kw("ir.attachment", "unlink", [existing])
+            logger.info("Eliminados %s attachments previos para %s.%s", len(existing), model, field)
+
+        # --- PASO B: Crear attachment HUÉRFANO (sin res_model/res_id) ---
+        # El external_attachment_storage ignora attachments sin res_id
+        attachment_id = client.execute_kw("ir.attachment", "create", [{
+            "name": name,
+            "type": "binary",
+            "datas": base64_data,
+            "mimetype": mime,
+        }])
+        logger.info("Attachment huérfano creado: id=%s, name=%s", attachment_id, name)
+
+        # --- PASO C: Vincular al registro con skip_external_sync=True ---
+        # El módulo respeta este contexto y NO sube a external
+        client.execute_kw(
+            "ir.attachment",
+            "write",
+            [[attachment_id], {
+                "res_model": model,
+                "res_id": record_id,
+                "res_field": field,
+            }],
+            {"context": {"skip_external_sync": True}}
+        )
+        logger.info("Attachment vinculado a %s.%s (id=%s) con skip_external_sync", model, field, record_id)
+
+        # Verificación opcional
+        check = client.execute_kw(model, "read", [[record_id]], {"fields": [field]})[0]
+        has_file = bool(check.get(field))
+        logger.info("✅ Archivo guardado en Odoo: %s", has_file)
+        return has_file
+
+    except Exception as e:
+        logger.error("❌ Error adjuntando archivo: %s", e, exc_info=True)
+        return False

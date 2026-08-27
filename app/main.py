@@ -297,37 +297,41 @@ def crear_libro_v2(data: dict = Body(...)):
     if str(data.get("sedesicalima", "")).strip() != "1":
         raise HTTPException(400, "Solo se registran reclamos de Lima en Odoo.")
     pdf_path = None
+    ticket_id = None
+    ticket_name = None
+    archivo_b64 = None
     try:
-        # Verificar si el archivo llegó
-        if data.get("pruebas"):
-            logger.info("Archivo recibido en request, longitud: %s", len(str(data["pruebas"])))
-        else:
-            logger.warning("No se recibió archivo en el request")
-        #------------------------------------------------------------
         fields_info = odoo.execute_kw("indecopi.complaints", "fields_get", [], {"attributes": ["type"]})
         odoo_fields = set(fields_info.keys())
-        # Verificar si 'pruebas' existe en Odoo
-        if "pruebas" in odoo_fields:
-            logger.info("Campo 'pruebas' existe en Odoo")
-        else:
-            logger.warning("Campo 'pruebas' NO existe en Odoo")
-            # Buscar campos binary alternativos
-            binary_fields = [k for k, v in fields_info.items() if v.get("type") == "binary"]
-            logger.info("Campos binary disponibles: %s", binary_fields)
-        #-----------------------------------------------------------------
+        
         libro_payload = libro_data(data)
+        archivo_b64 = libro_payload.get("pruebas")
         payload, unknown = build_odoo_payload(libro_payload, "indecopi.complaints", odoo_fields)
         
-        # Verificar que el archivo está en el payload
-        if payload.get("pruebas"):
-            logger.info("Archivo adjunto en payload para Odoo (tamaño: %s caracteres)", len(payload["pruebas"]))
-        else:
-            logger.warning("No se encontró 'pruebas' en el payload para Odoo")
+        if "pruebas" in payload:
+            logger.info("Quitando 'pruebas' del payload para procesarlo manualmente")
+            del payload["pruebas"]
         
         ticket_id = odoo.execute_kw("indecopi.complaints", "create", [payload])
         result = odoo.execute_kw("indecopi.complaints", "read", [[ticket_id]], {"fields": ["name"]})
         ticket_name = result[0].get("name", str(ticket_id)) if result else str(ticket_id)
         data["ticket_number"] = ticket_name
+        
+        if archivo_b64:
+            from app.core.odoo_client import attach_file_bypass_external
+            success = attach_file_bypass_external(
+                client=odoo,
+                model="indecopi.complaints",
+                record_id=ticket_id,
+                field="pruebas",
+                base64_data=archivo_b64
+            )
+            if success:
+                logger.info("✅ Archivo adjuntado correctamente a Odoo")
+            else:
+                logger.warning("⚠️ No se pudo adjuntar el archivo a Odoo")
+        else:
+            logger.info("No hay archivo para adjuntar")
     except HTTPException:
         raise
     except Exception as exc:
