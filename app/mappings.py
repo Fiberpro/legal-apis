@@ -382,10 +382,36 @@ APELACION_MAP = {
     "pruebas": "pruebas",
 }
 
+INDECOPI_MAP = {
+    # Mapeo de los campos que devuelve libro_data()
+    "tipo": "tipo",
+    "tipo_identificacion": "tipo_identificacion",
+    "nif": "nif",
+    "nombres": "nombres",
+    "apellidos": "apellidos",
+    "menor_edad": "menor_edad",
+    "departamento": "departamento",
+    "provincias": "provincias",
+    "distrito": "distrito",
+    "correo": "correo",
+    "movil": "movil",
+    "direccion": "direccion",
+    "autorizacion": "autorizacion",
+    "nombreapoderado": "nombreapoderado",
+    "materia_reclamo": "materia_reclamo",
+    "especifique_reclamo": "especifique_reclamo",
+    "identificion_producto_reclamo": "identificion_producto_reclamo",
+    "monto_producto_reclamo": "monto_producto_reclamo",
+    "especifique_incoveniente": "especifique_incoveniente",
+    "pedido_concreto_consumidor": "pedido_concreto_consumidor",
+    "pruebas": "pruebas",
+}
+
 FIELD_MAPS: Dict[str, Dict[str, str]] = {
     "reclamosfp": RECLAMO_MAP,
     "quejasfp": QUEJA_MAP,
     "apelacionfp": APELACION_MAP,
+    "indecopi.complaints": INDECOPI_MAP,
 }
 
 # -----------------------------------------------------------------------------
