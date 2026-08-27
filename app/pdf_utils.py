@@ -5,7 +5,7 @@ import os, tempfile
 
 ZoneInfo("America/Lima")
 
-# --- LIMPIAR TEXTO ---
+# --- LIMPIAR TEXTO gaaaa---
 def clean_text(txt):
     if not txt:
         return ""

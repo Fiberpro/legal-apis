@@ -32,9 +32,6 @@ def clean_text(txt):
 
     return txt.encode("latin-1", "replace").decode("latin-1").strip()
 
-
-
-
 class PDFReclamoOSIPTEL(FPDF):
 
     def header(self):
