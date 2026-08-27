@@ -560,7 +560,18 @@ def build_odoo_payload(data: dict, model: str, odoo_fields: set) -> Tuple[dict, 
     - odoo_fields: set de nombres de campo válidos en el modelo Odoo (vía fields_get).
     """
     field_map = FIELD_MAPS.get(model, {})
-    payload = {"state": "draft", "medio_reclamo": "WEB"}
+    #payload = {"state": "draft", "medio_reclamo": "WEB"}
+    payload = {}
+    # unknown: List[str] = []
+    # mapped = set()
+    
+    if "state" in odoo_fields:
+        payload["state"] = "draft"
+    
+    # Añadir medio_reclamo solo si existe en Odoo
+    if "medio_reclamo" in odoo_fields:
+        payload["medio_reclamo"] = "WEB"
+    
     unknown: List[str] = []
     mapped = set()
 
