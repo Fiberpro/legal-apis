@@ -275,7 +275,6 @@ def libro_data(data):
         "especifique_incoveniente": data.get("detalle"), 
         "pedido_concreto_consumidor": data.get("pedido"), 
         "pruebas": pruebas_b64,
-        "pruebasFile": pruebas_b64,
     }
 
 @app.post("/api/libroreclamaciones")
@@ -299,9 +298,25 @@ def crear_libro_v2(data: dict = Body(...)):
         raise HTTPException(400, "Solo se registran reclamos de Lima en Odoo.")
     pdf_path = None
     try:
+        # Verificar si el archivo llegó
+        if data.get("pruebas"):
+            logger.info("Archivo recibido en request, longitud: %s", len(str(data["pruebas"])))
+        else:
+            logger.warning("No se recibió archivo en el request")
+        #------------------------------------------------------------
         fields_info = odoo.execute_kw("indecopi.complaints", "fields_get", [], {"attributes": ["type"]})
         odoo_fields = set(fields_info.keys())
-        payload, unknown = build_odoo_payload(libro_data(data), "indecopi.complaints", odoo_fields)
+        # Verificar si 'pruebas' existe en Odoo
+        if "pruebas" in odoo_fields:
+            logger.info("Campo 'pruebas' existe en Odoo")
+        else:
+            logger.warning("Campo 'pruebas' NO existe en Odoo")
+            # Buscar campos binary alternativos
+            binary_fields = [k for k, v in fields_info.items() if v.get("type") == "binary"]
+            logger.info("Campos binary disponibles: %s", binary_fields)
+        #-----------------------------------------------------------------
+        libro_payload = libro_data(data)
+        payload, unknown = build_odoo_payload(libro_payload, "indecopi.complaints", odoo_fields)
         
         # Verificar que el archivo está en el payload
         if payload.get("pruebas"):
