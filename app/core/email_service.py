@@ -31,31 +31,27 @@ def send_legal_email(
     pdf_path: Optional[str] = None,
     attachments: Optional[List[Tuple[str, str, bytes]]] = None,
     cc_receptor: bool = True,
+    from_email_maxpro: Optional[str] = None,
 ) -> bool:
-    """
-    Envía correo vía SendGrid (obligatorio en Digital Ocean).
     
-    Args:
-        recipient: Correo del usuario (puede estar vacío si no autorizó)
-        subject: Asunto
-        body: Cuerpo en texto plano
-        pdf_path: Ruta al PDF de constancia
-        attachments: Lista de (nombre, mime_type, bytes) de archivos del frontend
-        cc_receptor: Si True, envía copia a MAIL_RECEPTOR
-    
-    Returns:
-        True si se envió, False si no hay destinatarios o falló SendGrid
-    """
     # Acceso defensivo: si alguien borra/renombra una variable, no rompemos.
     api_key = _safe(getattr(settings, "SENDGRID_API_KEY", None))
     receptor = _safe(getattr(settings, "MAIL_USERNAME", None)) or _safe(
         getattr(settings, "MAIL_RECEPTOR", None)
     )
     
-    from_addr = _safe(
-        getattr(settings, "MAIL_USERNAME", None)
-        or getattr(settings, "FROM_EMAIL", None)
-    ) or "noreply@fiberpro.pe"
+    if from_email_maxpro:
+        from_addr = _safe(from_email_maxpro)
+    else:
+        from_addr = _safe(
+            getattr(settings, "MAIL_USERNAME", None)
+            or getattr(settings, "FROM_EMAIL", None)
+        ) or "noreply@fiberpro.pe"
+    
+    # from_addr = _safe(
+    #     getattr(settings, "MAIL_USERNAME", None)
+    #     or getattr(settings, "FROM_EMAIL", None)
+    # ) or "noreply@fiberpro.pe"
     
     if not api_key:
         logger.error("SENDGRID_API_KEY no configurada — abortando envío")

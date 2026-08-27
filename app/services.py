@@ -1,8 +1,9 @@
-# app/services.py
 import smtplib
 import os
 import xmlrpc.client
 import logging
+import base64
+from app.core.odoo_client import detect_name_type_from_base64
 from typing import List, Optional, Tuple
 from email.message import EmailMessage
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -47,6 +48,7 @@ def send_legal_email(
     pdf_path: Optional[str] = None,
     attachments: Optional[List[Tuple[str, str, bytes]]] = None,
     cc_receptor: bool = True,
+    from_email_maxpro: Optional[str] = None,
     ) -> bool:
     """
     Envía correo vía SendGrid. Wrapper público que delega a app.core.email_service.
@@ -68,6 +70,7 @@ def send_legal_email(
         pdf_path=pdf_path,
         attachments=attachments,
         cc_receptor=cc_receptor,
+        from_email_maxpro=from_email_maxpro,
     )
 
 # --- Envío de Correos con PDF Adjunto ---
@@ -119,3 +122,66 @@ def build_maxpro_email(ticket_name: str) -> Tuple[str, str]:
     subject = "Confirmación de Libro de Reclamaciones - MAXPRO"
     body = f"Su reclamo fue registrado con el número: {ticket_name}."
     return subject, body
+
+def send_maxpro_legal_email(ticket_name: str, data: dict, pdf_path: str) -> bool:
+    """
+    Procesa adjuntos y envía el correo de MaxPro al usuario y al administrador.
+    Usa MAIL_USERNAME_MP exclusivamente.
+    """
+    user_email = str(data.get("correoelectronico", "") or "").strip()
+    mail_username_mp = str(getattr(settings, "MAIL_USERNAME_MP", "") or "").strip()
+    
+    subject = f"Libro de Reclamaciones INDECOPI - MAXPRO - {ticket_name}"
+    body = (
+        f"Estimado(a) {data.get('nombrescompletos', '')} {data.get('apellidoscompletos', '')},\n\n"
+        f"Tu reclamo fue recibido correctamente. Número: {ticket_name}.\n\n"
+        f"Adjunto encontrarás la constancia de tu reclamo.\n\n"
+        f"Saludos,\n"
+        f"MAXPRO"
+    )
+    
+    # Procesar adjuntos del frontend
+    attachments = []
+    if data.get("pruebas"):
+        raw = data["pruebas"].split(",", 1)[-1] if "," in data["pruebas"] else data["pruebas"]
+        try:
+            name, mime = detect_name_type_from_base64(raw)
+            attachments.append((name, mime, base64.b64decode(raw)))
+        except Exception as e:
+            logger.warning("Error procesando archivo para correo MaxPro: %s", e)
+            
+    success = True
+    
+    # 1. Enviar al usuario si autorizó correo
+    if user_email:
+        if not _send_legal_email(
+            recipient=user_email,
+            subject=subject,
+            body=body,
+            pdf_path=pdf_path,
+            attachments=attachments if attachments else None,
+            cc_receptor=False,
+            from_email_maxpro=mail_username_mp
+        ):
+            success = False
+        logger.info("Correo MaxPro enviado al usuario: %s", user_email)
+    else:
+        logger.warning("Usuario MaxPro sin correo electrónico")
+            
+    # 2. Enviar copia a MAIL_USERNAME_MP (exclusivo de MaxPro)
+    if mail_username_mp:
+        if not _send_legal_email(
+            recipient=mail_username_mp,
+            subject=f"[COPIA ADMIN MAXPRO] {subject}",
+            body=f"Ticket: {ticket_name}\nUsuario: {user_email}\n\n{body}",
+            pdf_path=pdf_path,
+            attachments=attachments if attachments else None,
+            cc_receptor=False,
+            from_email_maxpro=mail_username_mp
+        ):
+            success = False
+        logger.info("Copia de correo MaxPro enviada a: %s", mail_username_mp)
+    else:
+        logger.warning("MAIL_USERNAME_MP no configurado en .env")
+        
+    return success

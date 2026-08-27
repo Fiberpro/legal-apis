@@ -421,7 +421,7 @@ def crear_libro_maxpro(data: dict = Body(...)):
         odoo_fields = set(fields_info.keys())
         p, _ = build_odoo_payload(payload, "indecopi.complaints", odoo_fields)
         
-        # Remover 'pruebas' del payload para adjuntarlo manualmente
+        # Remover 'pruebas' del payload para adjuntarlo manualmente con bypass_external
         if "pruebas" in p:
             del p["pruebas"]
             
@@ -447,21 +447,10 @@ def crear_libro_maxpro(data: dict = Body(...)):
         # Generar PDF EXCLUSIVAMENTE con pdf_utils_maxpro
         pdf_path = generar_pdf_maxpro(data)
         
-        # Preparar archivo para el correo
-        attachment = None
-        if data.get("pruebas"):
-            raw = data["pruebas"].split(",", 1)[-1]
-            name, mime = detect_name_type_from_base64(raw)
-            attachment = (data.get("pruebasNombre", name), data.get("pruebasTipo", mime), base64.b64decode(raw))
-            
-        send_legal_email(
-            recipient=data["correoelectronico"],
-            subject="Confirmacion de Libro de Reclamaciones - MAXPRO",
-            body=f"Tu reclamo fue registrado con el numero: {ticket_name}.",
-            pdf_path=pdf_path,
-            attachments=[attachment] if attachment else None,
-            cc_receptor=False,
-        )
+        # Enviar correos (usuario y copia admin) usando el servicio exclusivo de MaxPro
+        from app.services import send_maxpro_legal_email
+        send_maxpro_legal_email(ticket_name, data, pdf_path)
+        
         return {"success": True, "ticket_id": ticket_name, "message": "Libro de reclamacion registrado correctamente."}
     except HTTPException:
         raise
