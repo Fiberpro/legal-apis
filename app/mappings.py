@@ -404,6 +404,7 @@ INDECOPI_MAP = {
     "monto_producto_reclamo": "monto_producto_reclamo",
     "especifique_incoveniente": "especifique_incoveniente",
     "pedido_concreto_consumidor": "pedido_concreto_consumidor",
+    "pruebasFile": "pruebas",
     "pruebas": "pruebas",
 }
 
@@ -442,6 +443,10 @@ FILE_FIELDS: Dict[str, List[str]] = {
     "apelacionfp": [
         "cartaPoder",
         "pruebas",
+    ],
+    "indecopi.complaints": [  # <-- NUEVO
+        "pruebas",
+        "pruebasFile",
     ],
 }
 

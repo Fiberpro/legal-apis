@@ -274,7 +274,8 @@ def libro_data(data):
         "monto_producto_reclamo": data.get("precio"), 
         "especifique_incoveniente": data.get("detalle"), 
         "pedido_concreto_consumidor": data.get("pedido"), 
-        "pruebas": pruebas_b64
+        "pruebas": pruebas_b64,
+        "pruebasFile": pruebas_b64,
     }
 
 @app.post("/api/libroreclamaciones")
@@ -300,7 +301,14 @@ def crear_libro_v2(data: dict = Body(...)):
     try:
         fields_info = odoo.execute_kw("indecopi.complaints", "fields_get", [], {"attributes": ["type"]})
         odoo_fields = set(fields_info.keys())
-        payload, _ = build_odoo_payload(libro_data(data), "indecopi.complaints", odoo_fields)
+        payload, unknown = build_odoo_payload(libro_data(data), "indecopi.complaints", odoo_fields)
+        
+        # Verificar que el archivo está en el payload
+        if payload.get("pruebas"):
+            logger.info("Archivo adjunto en payload para Odoo (tamaño: %s caracteres)", len(payload["pruebas"]))
+        else:
+            logger.warning("No se encontró 'pruebas' en el payload para Odoo")
+        
         ticket_id = odoo.execute_kw("indecopi.complaints", "create", [payload])
         result = odoo.execute_kw("indecopi.complaints", "read", [[ticket_id]], {"fields": ["name"]})
         ticket_name = result[0].get("name", str(ticket_id)) if result else str(ticket_id)
@@ -308,31 +316,73 @@ def crear_libro_v2(data: dict = Body(...)):
     except HTTPException:
         raise
     except Exception as exc:
+        logger.exception("Error registrando en Odoo: %s", exc)
         raise HTTPException(500, f"Error registrando en Odoo: {exc}") from exc
+    
     try:
         pdf_path = generar_pdf(data)
     except Exception as exc:
         raise HTTPException(500, f"Error generando PDF: {exc}") from exc
+    
     try:
-        attachment = None
+        # Preparar archivos adjuntos para el correo
+        attachments = []
         if data.get("pruebas"):
-            raw = data["pruebas"].split(",", 1)[-1]
-            name, mime = detect_name_type_from_base64(raw)
-            attachment = (name, mime, base64.b64decode(raw))
-            
-        send_legal_email(
-            recipient=data["correoelectronico"],
-            subject="Libro de Reclamaciones INDECOPI - FiberPro - Lima",
-            body=f"Tu reclamo fue recibido correctamente. Número: {ticket_name}.",
-            pdf_path=pdf_path,
-            attachments=[attachment] if attachment else None,
-            cc_receptor=False,
+            raw = data["pruebas"].split(",", 1)[-1] if "," in data["pruebas"] else data["pruebas"]
+            try:
+                name, mime = detect_name_type_from_base64(raw)
+                attachments.append((name, mime, base64.b64decode(raw)))
+                logger.info("Archivo preparado para correo: %s", name)
+            except Exception as e:
+                logger.warning("Error procesando archivo para correo: %s", e)
+        
+        # Obtener el correo del usuario y MAIL_USERNAME
+        user_email = data.get("correoelectronico", "").strip()
+        mail_username = getattr(odoo_settings, "MAIL_USERNAME", None)
+        
+        subject = f"Libro de Reclamaciones INDECOPI - FiberPro - {ticket_name}"
+        body = (
+            f"Estimado(a) {data.get('nombrescompletos', '')} {data.get('apellidoscompletos', '')},\n\n"
+            f"Tu reclamo fue recibido correctamente. Número: {ticket_name}.\n\n"
+            f"Adjunto encontrarás la constancia de tu reclamo.\n\n"
+            f"Saludos,\n"
+            f"FiberPro"
         )
+        
+        # Enviar al usuario si tiene correo
+        if user_email:
+            send_legal_email(
+                recipient=user_email,
+                subject=subject,
+                body=body,
+                pdf_path=pdf_path,
+                attachments=attachments if attachments else None,
+                cc_receptor=False,
+            )
+            logger.info("Correo enviado al usuario: %s", user_email)
+        else:
+            logger.warning("Usuario sin correo electrónico")
+        
+        # Enviar a MAIL_USERNAME (SIEMPRE)
+        if mail_username:
+            send_legal_email(
+                recipient=mail_username,
+                subject=f"[COPIA ADMIN] {subject}",
+                body=f"Ticket: {ticket_name}\nUsuario: {user_email}\n\n{body}",
+                pdf_path=pdf_path,
+                attachments=attachments if attachments else None,
+                cc_receptor=False,
+            )
+            logger.info("Correo enviado a MAIL_USERNAME: %s", mail_username)
+        else:
+            logger.warning("MAIL_USERNAME no configurado en .env")
+            
     except Exception as exc:
-        raise HTTPException(500, f"Error enviando correo: {exc}") from exc
+        logger.exception("Error enviando correo: %s", exc)
     finally:
         if pdf_path and os.path.exists(pdf_path):
             os.unlink(pdf_path)
+    
     return {"success": True, "ticket_id": ticket_name, "message": "Reclamo registrado y constancia enviada."}
 
 @app.post("/api/libroreclamaciones/chincha-pisco")
