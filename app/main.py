@@ -6,7 +6,7 @@ from email.message import EmailMessage
 from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.core.odoo_client import (clean_base64, attach_bytes, detect_name_type_from_base64, odoo, odoo_2,
+from app.core.odoo_client import (clean_base64, attach_bytes, attach_file_bypass_external, detect_name_type_from_base64, odoo, odoo_2,
                                   resolve_many2one_value, send_smtp_email, settings as odoo_settings, validate_date)
 from app.core.email_service import send_legal_email
 from app.mappings import (
@@ -18,6 +18,7 @@ from app.mappings import (
 )
 from app.pdf_utils_osiptel_v2 import generar_pdf as generar_pdf_osiptel_v2
 from app.pdf_utils import generar_pdf, generar_pdf_osiptel
+from app.pdf_utils_maxpro import generar_pdf as generar_pdf_maxpro
 
 app = FastAPI(title="API Legal - FiberPro", version="2.1.0")
 logger = logging.getLogger("api_legal")
@@ -409,21 +410,50 @@ def crear_libro_maxpro(data: dict = Body(...)):
     pdf_path = None
     try:
         payload = libro_data(data)
+        
+        # Extraer el archivo base64 antes de enviar el payload a Odoo
+        archivo_b64 = payload.get("pruebas")
+        
         for field in ("departamento", "provincias", "distrito", "materia_reclamo"):
             payload[field] = resolve_many2one_value(odoo_2, "indecopi.complaints", field, payload.get(field))
+            
         fields_info = odoo_2.execute_kw("indecopi.complaints", "fields_get", [], {"attributes": ["type"]})
         odoo_fields = set(fields_info.keys())
         p, _ = build_odoo_payload(payload, "indecopi.complaints", odoo_fields)
+        
+        # Remover 'pruebas' del payload para adjuntarlo manualmente
+        if "pruebas" in p:
+            del p["pruebas"]
+            
         ticket_id = odoo_2.execute_kw("indecopi.complaints", "create", [p])
         result = odoo_2.execute_kw("indecopi.complaints", "read", [[ticket_id]], {"fields": ["name"]})
         ticket_name = result[0].get("name", str(ticket_id)) if result else str(ticket_id)
         data["ticket_number"] = ticket_name
-        pdf_path = generar_pdf(data)
+        
+        # Guardar archivo en Odoo MaxPro (odoo_2) usando bypass de storage externo
+        if archivo_b64:
+            success = attach_file_bypass_external(
+                client=odoo_2,
+                model="indecopi.complaints",
+                record_id=ticket_id,
+                field="pruebas",
+                base64_data=archivo_b64
+            )
+            if success:
+                logger.info("✅ Archivo adjuntado correctamente a Odoo MaxPro")
+            else:
+                logger.warning("⚠️ No se pudo adjuntar el archivo a Odoo MaxPro")
+        
+        # Generar PDF EXCLUSIVAMENTE con pdf_utils_maxpro
+        pdf_path = generar_pdf_maxpro(data)
+        
+        # Preparar archivo para el correo
         attachment = None
         if data.get("pruebas"):
             raw = data["pruebas"].split(",", 1)[-1]
             name, mime = detect_name_type_from_base64(raw)
             attachment = (data.get("pruebasNombre", name), data.get("pruebasTipo", mime), base64.b64decode(raw))
+            
         send_legal_email(
             recipient=data["correoelectronico"],
             subject="Confirmacion de Libro de Reclamaciones - MAXPRO",
