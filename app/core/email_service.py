@@ -32,10 +32,16 @@ def send_legal_email(
     attachments: Optional[List[Tuple[str, str, bytes]]] = None,
     cc_receptor: bool = True,
     from_email_maxpro: Optional[str] = None,
+    api_key_override: Optional[str] = None,
 ) -> bool:
     
+    override = _safe(api_key_override)
+    if override:
+        api_key = override
+    else:
+        api_key = _safe(getattr(settings, "SENDGRID_API_KEY", None))
     # Acceso defensivo: si alguien borra/renombra una variable, no rompemos.
-    api_key = _safe(getattr(settings, "SENDGRID_API_KEY", None))
+    
     receptor = _safe(getattr(settings, "MAIL_USERNAME", None)) or _safe(
         getattr(settings, "MAIL_RECEPTOR", None)
     )
