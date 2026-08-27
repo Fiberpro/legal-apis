@@ -5,14 +5,18 @@ import os, tempfile
 
 ZoneInfo("America/Lima")
 
-# --- LIMPIAR TEXTO gaaaa---
+# --- LIMPIAR TEXTO ---
 def clean_text(txt):
     if not txt:
         return ""
+    txt = str(txt)
     replacements = {
         "–": "-", "—": "-", "“": '"', "”": '"',
         "‘": "'", "’": "'", "•": "-", "°": "o",
-        "…": "...", "©": "(c)", "®": "(R)", "\xa0": " "
+        "…": "...", "©": "(c)", "®": "(R)", "\xa0": " ",
+        "ñ": "n", "Ñ": "N", "á": "a", "é": "e", "í": "i",
+        "ó": "o", "ú": "u", "Á": "A", "É": "E", "Í": "I",
+        "Ó": "O", "Ú": "U", "ü": "u", "Ü": "U"
     }
     for bad, good in replacements.items():
         txt = txt.replace(bad, good)

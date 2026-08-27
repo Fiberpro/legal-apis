@@ -1,13 +1,22 @@
 import base64
 import logging
-import mimetypes
 import os
+from typing import Optional
 from email.message import EmailMessage
 from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.core.odoo_client import (attach_bytes, detect_name_type_from_base64, odoo, odoo_2,
-                                  resolve_many2one_value, send_smtp_email, settings, validate_date, clean_base64)
+from app.core.odoo_client import (clean_base64, attach_bytes, detect_name_type_from_base64, odoo, odoo_2,
+                                  resolve_many2one_value, send_smtp_email, settings as odoo_settings, validate_date)
+from app.core.email_service import send_legal_email
+from app.mappings import (
+    build_odoo_payload,
+    normalize_for_pdf,
+    extract_email_attachments,
+    DATE_FIELDS,
+    REQUIRED_FIELDS,
+)
+from app.pdf_utils_osiptel_v2 import generar_pdf as generar_pdf_osiptel_v2
 from app.pdf_utils import generar_pdf, generar_pdf_osiptel
 
 app = FastAPI(title="API Legal - FiberPro", version="2.1.0")
@@ -15,79 +24,54 @@ logger = logging.getLogger("api_legal")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
                    allow_methods=["*"], allow_headers=["*"])
 
-DATE_FIELDS = {"fechaEmisionDocumentoIdentidad", "fechaNacimiento", "fechaVencimiento", "fechaEmisionFC", "fechaVencimientoFC", "fechaEstimadaPagoFC", "fechaInicioCalidadI", "fechaIncumplimientos", "fechAproximadaIncumplimiento", "fechaCualPincumplimiento", "fechaEmisionIncumplimineto", "fechavencimientoIncumplimineto", "fechaAproxInfoOmitida", "fechaInicioProblemafs", "fechaReactivarServicio", "fechaPagoPendiente", "fechaSIMCARD", "fechaContratacionServicioInstalacion", "fechaSolicitudTrasladoInstalacion", "fechaContratacionSInstalacion", "fechaSolicitudBaja", "fechaSolicitudSuspensionBaja", "fechaEmisionBaja", "fechaVencimientoBaja", "fechaEmisionContratacion", "fechaVencimientoContratacion", "fechaSolicitudMigracionX", "fechaEmisionMigracionIII", "fechaMovimientoMigracion", "fechaEmisionII", "fechaVencimientoMigracionII", "fechaEmisionMigracion", "fechaVencimientoMigracion", "fechaSolicitudX", "fechaEmisionX", "fechaVencimientoX", "fechaSolicitudFacturacionX"}
-ALIASES = {"tipoUsuario": "tipo_de_usuario", "numeroDocumentIdentidad": "numero_documento_identidad_reclamo", "tipoDocumentoIdentidad": "tipo_documento_identidad", "nombre": "nombre_cliente", "numeroContacto": "nro_contacto", "numDoc": "nro_documento", "distritos": "distrito_cliente", "direccion": "direccion_cliente", "correo": "correo_electronico", "booleanValue": "notificacion_por_correo_electronico", "idReclamo": "materia_reclamable", "idReclamoEscogido": "problema_espec", "empresaOperadora": "empresa_operadora_dsr", "servicioContratado": "servicio_contratado_dsr", "numeroServicioContratado": "nmero_cdigo_servicio_contrato_dsr", "servicioMateriaReclamo": "servicio_materia_de_reclamo", "cartaPoder": "carta_de_poder", "hojaDocumentoAdjuntada": "adjunta_doc_cobro", "adjuntarVinculo": "documento", "vinculoAdjuntarSolicitud": "documento_1", "vinculoSolicitudReclamo": "vinculo_de_documento_adjuntado", "adjuntarSolicitudReclamoCuatro": "vinculo_del_documento_adjuntando", "solicitudBajaReclamo": "vinculo_del_documento_2", "adjuntarVinculoSolicitud": "vinculo_del_documento_1"}
-
 def require(data, fields):
-    missing = next((field for field in fields if field not in data), None)
-    if missing:
-        raise HTTPException(400, f"Falta el campo requerido: {missing}")
+    """Valida que los campos requeridos existan en el payload y no estén vacíos."""
+    for field in fields:
+        val = data.get(field)
+        if val is None or val == "":
+            raise HTTPException(400, f"Falta el campo requerido o está vacío: {field}")
 
-def create_ticket(client, model, data, extra=None):
-    fields = client.execute_kw(model, "fields_get", [], {"attributes": ["type"]})
-    payload = {key: value for key, value in data.items() if key in fields and value is not None}
-    payload.update({target: data[source] for source, target in ALIASES.items()
-                    if target in fields and data.get(source) is not None})
-    payload.update({key: value for key, value in (extra or {}).items() if key in fields and value is not None})
-    
-    # Extraemos y limpiamos el base64
-    pruebas_b64 = data.get("pruebas") or (extra or {}).get("pruebas")
-    if isinstance(pruebas_b64, str) and "," in pruebas_b64:
-        pruebas_b64 = pruebas_b64.split(",", 1)[-1]
-    
-    # Quitamos del payload para evitar problemas durante el create
-    payload.pop("pruebas", None)
-    
-    # 1. Creamos el ticket SIN el archivo
-    ticket_id = client.execute_kw(model, "create", [payload])
-    
-    # 2. Adjuntamos el archivo bypassando external_attachment_storage
-    if pruebas_b64 and ticket_id:
-        try:
-            # Detectar nombre y mimetype
-            name, mime = detect_name_type_from_base64(pruebas_b64)
-            
-            # --- PASO A: Eliminar attachments previos de este campo (si existen) ---
-            existing = client.execute_kw("ir.attachment", "search", [
-                [("res_model", "=", model), ("res_id", "=", ticket_id), ("res_field", "=", "pruebas")]
-            ])
-            if existing:
-                client.execute_kw("ir.attachment", "unlink", [existing])
-            
-            # --- PASO B: Crear attachment HUÉRFANO (sin res_model/res_id) ---
-            # El módulo external_attachment_storage ignora attachments sin res_id
-            attachment_id = client.execute_kw("ir.attachment", "create", [{
-                "name": name,
-                "type": "binary",
-                "datas": pruebas_b64,
-                "mimetype": mime,
-            }])
-            
-            # --- PASO C: Vincular al registro con skip_external_sync=True ---
-            # El write del módulo SÍ respeta este contexto y NO sube a external
-            client.execute_kw(
-                "ir.attachment",
-                "write",
-                [[attachment_id], {
-                    "res_model": model,
-                    "res_id": ticket_id,
-                    "res_field": "pruebas",
-                }],
-                {"context": {"skip_external_sync": True}}
-            )
-            
-            # Verificación
-            check = client.execute_kw(model, "read", [[ticket_id]], {"fields": ["pruebas"]})[0]
-            has_file = bool(check.get("pruebas"))
-            print(f"pruebas guardado: {has_file}", flush=True)
-            logger.info(f"✅ Archivo adjuntado al ticket {ticket_id}: {has_file}")
-            
-        except Exception as e:
-            print(f"ERROR write pruebas: {e}", flush=True)
-            logger.error(f"❌ Error al adjuntar archivo en Odoo: {e}", exc_info=True)
-            raise HTTPException(500, f"Error guardando archivo: {e}")
+def create_ticket_with_mapping(client, model: str, data: dict):
+    try:
+        fields_info = client.execute_kw(model, "fields_get", [], {"attributes": ["type"]})
+        odoo_fields = set(fields_info.keys())
+    except Exception as exc:
+        logger.error("No se pudo obtener fields_get de %s: %s", model, exc)
+        raise HTTPException(500, f"Error consultando modelo Odoo {model}") from exc
 
-    return ticket_id, client.execute_kw(model, "read", [[ticket_id]], {"fields": ["name"]})[0].get("name", str(ticket_id))
+    # Construir payload con mapeo completo
+    payload, unknown = build_odoo_payload(data, model, odoo_fields)
+    if unknown:
+        logger.info("Campos ignorados (no mapeados o no existen en Odoo): %s", unknown)
+
+    # Limpiar base64 de campos binarios dinámicamente
+    # Obtenemos los campos tipo binary directamente de Odoo
+    binary_odoo_keys = {k for k, v in fields_info.items() if v.get("type") == "binary"}
+    
+    for key in list(payload.keys()):
+        if key in binary_odoo_keys and isinstance(payload[key], str):
+            cleaned = clean_base64(payload[key])
+            if cleaned and len(cleaned) > 100:
+                payload[key] = cleaned
+            else:
+                payload.pop(key, None)
+
+    # Crear ticket
+    try:
+        ticket_id = client.execute_kw(model, "create", [payload])
+    except Exception as exc:
+        logger.error("Error creando ticket en Odoo (%s): %s", model, exc)
+        raise HTTPException(400, f"Error creating ticket: {exc}") from exc
+
+    # Leer nombre
+    try:
+        result = client.execute_kw(model, "read", [[ticket_id]], {"fields": ["name"]})
+        ticket_name = result[0].get("name", str(ticket_id)) if result else str(ticket_id)
+    except Exception as exc:
+        logger.warning("No se pudo leer nombre del ticket %s: %s", ticket_id, exc)
+        ticket_name = str(ticket_id)
+
+    return ticket_id, ticket_name
 
 @app.get("/api/distritos")
 @app.get("/api/ubicaciones/distritos")
@@ -131,10 +115,10 @@ def listar_distritos(
 def listar_distritos_por_provincia(provincia_id: str):
     return listar_distritos(provincia_id=provincia_id)
 
-
 def send_pdf(recipient, subject, body, pdf_path, attachment=None, username=None, password=None):
     try:
-        username, password = username or settings.MAIL_USERNAME, password if password is not None else settings.MAIL_PASSWORD
+        # Corrección: usar odoo_settings en lugar de settings
+        username, password = username or odoo_settings.MAIL_USERNAME, password if password is not None else odoo_settings.MAIL_PASSWORD
         message = EmailMessage()
         message["Subject"], message["From"], message["To"] = subject, username, recipient
         message.set_content(body)
@@ -147,27 +131,124 @@ def send_pdf(recipient, subject, body, pdf_path, attachment=None, username=None,
         logger.exception("No se pudo enviar el correo SMTP")
         raise
 
-def legal_ticket(data, model):
-    for field in DATE_FIELDS.intersection(data): data[field] = validate_date(data[field])
-    require(data, ["tipoUsuario", "numeroDocumentIdentidad", "nombre", "apellidos", "correo"])
+def process_legal_ticket(data: dict, model: str, tipo_label: str):
+    pdf_path: Optional[str] = None
+    
     try:
-        ticket_id, ticket_name = create_ticket(odoo, model, data, {"state": "draft", "medio_reclamo": "WEB", "medio_queja": "WEB"})
-        return {"success": True, "ticket_id": ticket_id, "ticket_name": ticket_name}
+        # ─── 1. VALIDAR FECHAS ───
+        for field in DATE_FIELDS.get(model, []):
+            if field in data and data[field]:
+                validated = validate_date(data[field])
+                if validated is False and data[field] not in ("", None):
+                    raise HTTPException(400, f"Fecha inválida en {field}: {data[field]}")
+                data[field] = validated
+
+        # ─── 3. CREAR TICKET EN ODOO ───
+        ticket_id, ticket_name = create_ticket_with_mapping(odoo, model, data)
+        logger.info("Ticket %s creado: %s (id=%s)", tipo_label, ticket_name, ticket_id)
+
+        # ─── 4. GENERAR PDF ───
+        pdf_sent = False
+        email_sent = False
+        error_pdf = None
+        error_email = None
+
+        try:
+            pdf_data = normalize_for_pdf(data, model, ticket_name)
+            pdf_path = generar_pdf_osiptel_v2(pdf_data)
+            pdf_sent = True
+            logger.info("PDF generado: %s", pdf_path)
+        except Exception as exc:
+            error_pdf = str(exc)
+            logger.exception("Error generando PDF para %s %s", tipo_label, ticket_name)
+        
+        #─── 5. ENVIAR CORREO (SendGrid) ───
+        if pdf_sent and pdf_path:
+            try:
+                recipient = (data.get("correo") or "").strip()
+                
+                # El frontend envía autorizacion o booleanValue (puede ser "True"/"False" string o bool)
+                notify_val = data.get("autorizacion", data.get("booleanValue"))
+                notify = str(notify_val).lower() in ("true", "1", "si", "yes")
+                
+                # Política de correo:
+                # - Si autoriza, enviar al correo del usuario
+                # - Enviar copia a MAIL_RECEPTOR siempre (para registro interno)
+                # - No enviar si no hay ningún destinatario válido
+                if not recipient and not odoo_settings.MAIL_RECEPTOR:
+                    logger.info("No se envía correo: sin destinatario y sin MAIL_RECEPTOR")
+                else:
+                    subject = f"Constancia de {tipo_label} - FiberPro - {ticket_name}"
+                    body = (
+                        f"Estimado(a) {data.get('nombre', '')} {data.get('apellidos', '')},\n\n"
+                        f"Su {tipo_label.lower()} ha sido registrado correctamente.\n"
+                        f"Número de ticket: {ticket_name}\n\n"
+                        f"Adjunto encontrará su constancia en PDF."
+                    )
+                    
+                    attachments = extract_email_attachments(data, model)
+                    
+                    email_sent = send_legal_email(
+                        recipient=recipient if notify else "",
+                        subject=subject,
+                        body=body,
+                        pdf_path=pdf_path,
+                        attachments=attachments,
+                        cc_receptor=True,
+                    )
+                    
+                    if not email_sent:
+                        error_email = "Fallo en el envío vía SendGrid (ver logs)"
+            except Exception as exc:
+                error_email = str(exc)
+                logger.exception("Error enviando correo para %s %s", tipo_label, ticket_name)
+
+        # ─── 6. RESPUESTA JSON ───
+        response = {
+            "success": True,
+            "ticket_id": ticket_id,
+            "ticket_name": ticket_name,
+            "pdf_sent": pdf_sent,
+            "pdf_sent": False,
+            "email_sent": email_sent,
+        }
+        
+        if error_pdf:
+            response["warning_pdf"] = "El ticket se creó pero no se pudo generar la constancia PDF."
+        if error_email:
+            response["warning_email"] = "El ticket y PDF se generaron pero no se pudo enviar el correo."
+
+    except HTTPException:
+        raise
     except Exception as exc:
-        raise HTTPException(400, f"Error creating ticket: {exc}") from exc
+        logger.exception("Error inesperado en process_legal_ticket: %s", exc)
+        raise HTTPException(500, f"Error interno del servidor: {exc}") from exc
+    finally:
+        # ─── 7. LIMPIAR TEMPORALES ───
+        if pdf_path and os.path.exists(pdf_path):
+            try:
+                os.unlink(pdf_path)
+                logger.debug("Archivo temporal eliminado: %s", pdf_path)
+            except Exception as e:
+                logger.warning("No se pudo eliminar PDF temporal %s: %s", pdf_path, e)
 
 @app.post("/api/reclamos/reclamo")
-def crear_reclamo(data: dict = Body(...)): return legal_ticket(data, "reclamosfp")
+def crear_reclamo(data: dict = Body(...)): 
+    return process_legal_ticket(data, "reclamosfp", "Reclamo")
 
 @app.post("/api/reclamos/queja")
-def crear_queja(data: dict = Body(...)): return legal_ticket(data, "quejasfp")
+def crear_queja(data: dict = Body(...)): 
+    return process_legal_ticket(data, "quejasfp", "Queja")
 
 @app.post("/api/reclamos/apelaciones")
-def crear_apelacion(data: dict = Body(...)): return legal_ticket(data, "apelacionfp")
+def crear_apelacion(data: dict = Body(...)): 
+    return process_legal_ticket(data, "apelacionfp", "Apelación")
+
+# =============================================================================
+# ENDPOINTS LEGACY (INDECOPI) - No modificar
+# =============================================================================
 
 def libro_data(data):
-    require(data, ["tipo", "tipodocumento", "numerodocumento", "nombrescompletos", "apellidoscompletos", "correoelectronico", "materiareclamable", "productos", "precio", "detalle", "pedido"])
-    
     pruebas_b64 = data.get("pruebas")
     if pruebas_b64 and isinstance(pruebas_b64, str) and "," in pruebas_b64:
         pruebas_b64 = pruebas_b64.split(",", 1)[-1]
@@ -199,23 +280,39 @@ def libro_data(data):
 @app.post("/api/libroreclamaciones")
 def crear_libro(data: dict = Body(...)):
     try:
-        ticket_id, ticket_name = create_ticket(odoo, "indecopi.complaints", {}, libro_data(data))
+        fields_info = odoo.execute_kw("indecopi.complaints", "fields_get", [], {"attributes": ["type"]})
+        odoo_fields = set(fields_info.keys())
+        payload, _ = build_odoo_payload(libro_data(data), "indecopi.complaints", odoo_fields)
+        ticket_id = odoo.execute_kw("indecopi.complaints", "create", [payload])
+        result = odoo.execute_kw("indecopi.complaints", "read", [[ticket_id]], {"fields": ["name"]})
+        ticket_name = result[0].get("name", str(ticket_id)) if result else str(ticket_id)
         return {"ticket_id": ticket_name, "message": "Libro de reclamacion registrado correctamente."}
-    except HTTPException: raise
-    except Exception as exc: raise HTTPException(400, str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 @app.post("/api/libroreclamaciones/v2")
 def crear_libro_v2(data: dict = Body(...)):
-    if str(data.get("sedesicalima", "")).strip() != "1": raise HTTPException(400, "Solo se registran reclamos de Lima en Odoo.")
+    if str(data.get("sedesicalima", "")).strip() != "1":
+        raise HTTPException(400, "Solo se registran reclamos de Lima en Odoo.")
     pdf_path = None
     try:
-        ticket_id, ticket_name = create_ticket(odoo, "indecopi.complaints", {}, libro_data(data))
+        fields_info = odoo.execute_kw("indecopi.complaints", "fields_get", [], {"attributes": ["type"]})
+        odoo_fields = set(fields_info.keys())
+        payload, _ = build_odoo_payload(libro_data(data), "indecopi.complaints", odoo_fields)
+        ticket_id = odoo.execute_kw("indecopi.complaints", "create", [payload])
+        result = odoo.execute_kw("indecopi.complaints", "read", [[ticket_id]], {"fields": ["name"]})
+        ticket_name = result[0].get("name", str(ticket_id)) if result else str(ticket_id)
         data["ticket_number"] = ticket_name
-    except HTTPException: raise
-    except Exception as exc: raise HTTPException(500, f"Error registrando en Odoo: {exc}") from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"Error registrando en Odoo: {exc}") from exc
     try:
         pdf_path = generar_pdf(data)
-    except Exception as exc: raise HTTPException(500, f"Error generando PDF: {exc}") from exc
+    except Exception as exc:
+        raise HTTPException(500, f"Error generando PDF: {exc}") from exc
     try:
         attachment = None
         if data.get("pruebas"):
@@ -223,17 +320,19 @@ def crear_libro_v2(data: dict = Body(...)):
             name, mime = detect_name_type_from_base64(raw)
             attachment = (name, mime, base64.b64decode(raw))
             
-        send_pdf(
-            data["correoelectronico"],
-            "Libro de Reclamaciones INDECOPI - FiberPro - Lima",
-            f"Tu reclamo fue recibido correctamente. Número: {ticket_name}.",
-            pdf_path,
-            attachment=attachment
+        send_legal_email(
+            recipient=data["correoelectronico"],
+            subject="Libro de Reclamaciones INDECOPI - FiberPro - Lima",
+            body=f"Tu reclamo fue recibido correctamente. Número: {ticket_name}.",
+            pdf_path=pdf_path,
+            attachments=[attachment] if attachment else None,
+            cc_receptor=False,
         )
     except Exception as exc:
-        raise HTTPException(500, f"Error enviando correo SMTP: {exc}") from exc
+        raise HTTPException(500, f"Error enviando correo: {exc}") from exc
     finally:
-        if pdf_path and os.path.exists(pdf_path): os.unlink(pdf_path)
+        if pdf_path and os.path.exists(pdf_path):
+            os.unlink(pdf_path)
     return {"success": True, "ticket_id": ticket_name, "message": "Reclamo registrado y constancia enviada."}
 
 @app.post("/api/libroreclamaciones/chincha-pisco")
@@ -243,22 +342,38 @@ def crear_libro_maxpro(data: dict = Body(...)):
         payload = libro_data(data)
         for field in ("departamento", "provincias", "distrito", "materia_reclamo"):
             payload[field] = resolve_many2one_value(odoo_2, "indecopi.complaints", field, payload.get(field))
-        _, ticket_name = create_ticket(odoo_2, "indecopi.complaints", {}, payload)
-        
-        data["ticket_number"], pdf_path = ticket_name, generar_pdf(data)
+        fields_info = odoo_2.execute_kw("indecopi.complaints", "fields_get", [], {"attributes": ["type"]})
+        odoo_fields = set(fields_info.keys())
+        p, _ = build_odoo_payload(payload, "indecopi.complaints", odoo_fields)
+        ticket_id = odoo_2.execute_kw("indecopi.complaints", "create", [p])
+        result = odoo_2.execute_kw("indecopi.complaints", "read", [[ticket_id]], {"fields": ["name"]})
+        ticket_name = result[0].get("name", str(ticket_id)) if result else str(ticket_id)
+        data["ticket_number"] = ticket_name
+        pdf_path = generar_pdf(data)
         attachment = None
         if data.get("pruebas"):
             raw = data["pruebas"].split(",", 1)[-1]
             name, mime = detect_name_type_from_base64(raw)
             attachment = (data.get("pruebasNombre", name), data.get("pruebasTipo", mime), base64.b64decode(raw))
-        send_pdf(data["correoelectronico"], "Confirmacion de Libro de Reclamaciones - MAXPRO", f"Tu reclamo fue registrado con el numero: {ticket_name}.", pdf_path, attachment, settings.MAIL_USERNAME_MP, settings.MAIL_PASSWORD_MP)
+        send_legal_email(
+            recipient=data["correoelectronico"],
+            subject="Confirmacion de Libro de Reclamaciones - MAXPRO",
+            body=f"Tu reclamo fue registrado con el numero: {ticket_name}.",
+            pdf_path=pdf_path,
+            attachments=[attachment] if attachment else None,
+            cc_receptor=False,
+        )
         return {"success": True, "ticket_id": ticket_name, "message": "Libro de reclamacion registrado correctamente."}
-    except HTTPException: raise
-    except ValueError as exc: raise HTTPException(400, str(exc)) from exc
-    except Exception as exc: raise HTTPException(500, str(exc)) from exc
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(500, str(exc)) from exc
     finally:
-        if pdf_path and os.path.exists(pdf_path): os.unlink(pdf_path)
-
+        if pdf_path and os.path.exists(pdf_path):
+            os.unlink(pdf_path)
+            
 @app.post("/api/enviar_pdf")
 def enviar_pdf(data: dict = Body(...)):
     return enviar_constancia(data, False)
@@ -267,7 +382,7 @@ def enviar_constancia(data, osiptel=False):
     pdf_path = None
     try:
         pdf_path = generar_pdf_osiptel(data) if osiptel else generar_pdf(data)
-        recipient = settings.MAIL_RECEPTOR
+        recipient = odoo_settings.MAIL_RECEPTOR
         source = data.get("datos_generales", data)
         subject = "Formulario OSIPTEL - Reclamo / Queja - Sede ICA" if osiptel else "Libro de Reclamaciones INDECOPI - FiberPro-ICA"
         body = f"Cliente: {source.get('nombrescompletos', '')} {source.get('apellidoscompletos', '')}\nDocumento: {source.get('numerodocumento', '')}"
@@ -278,16 +393,27 @@ def enviar_constancia(data, osiptel=False):
             name, mime = detect_name_type_from_base64(raw)
             attachment = (name, mime, base64.b64decode(raw))
             
-        send_pdf(recipient, subject, body, pdf_path, attachment)
+        send_legal_email(
+            recipient=recipient,
+            subject=subject,
+            body=body,
+            pdf_path=pdf_path,
+            attachments=[attachment] if attachment else None,
+            cc_receptor=False,
+        )
         return {"success": True, "message": f"PDF enviado correctamente a {recipient}"}
-    except Exception as exc: raise HTTPException(500, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(500, str(exc)) from exc
     finally:
-        if pdf_path and os.path.exists(pdf_path): os.unlink(pdf_path)
+        if pdf_path and os.path.exists(pdf_path):
+            os.unlink(pdf_path)
 
 @app.post("/api/osiptel/ica")
-def osiptel_ica(data: dict = Body(...)): return enviar_constancia(data, True)
+def osiptel_ica(data: dict = Body(...)): 
+    return enviar_constancia(data, True)
 
 @app.post("/api/osiptel/ica/v2")
 def osiptel_ica_v2(data: dict = Body(...)):
-    if not data.get("datos_generales"): raise HTTPException(400, "Estructura inválida: datos_generales no encontrado")
+    if not data.get("datos_generales"): 
+        raise HTTPException(400, "Estructura inválida: datos_generales no encontrado")
     return enviar_constancia(data, True)
