@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     ODOO_PASSWORD_2: str
     
     SENDGRID_API_KEY: str
+    SENDGRID_API_KEY_MP: str = ""
     FROM_EMAIL: str = ""
     
     MAIL_SERVER: str = "smtp.gmail.com"
@@ -49,6 +50,7 @@ def send_legal_email(
     attachments: Optional[List[Tuple[str, str, bytes]]] = None,
     cc_receptor: bool = True,
     from_email_maxpro: Optional[str] = None,
+    api_key_override: Optional[str] = None,
     ) -> bool:
     """
     Envía correo vía SendGrid. Wrapper público que delega a app.core.email_service.
@@ -71,6 +73,7 @@ def send_legal_email(
         attachments=attachments,
         cc_receptor=cc_receptor,
         from_email_maxpro=from_email_maxpro,
+        api_key_override=api_key_override,
     )
 
 # --- Envío de Correos con PDF Adjunto ---
@@ -130,6 +133,7 @@ def send_maxpro_legal_email(ticket_name: str, data: dict, pdf_path: str) -> bool
     """
     user_email = str(data.get("correoelectronico", "") or "").strip()
     mail_username_mp = str(getattr(settings, "MAIL_USERNAME_MP", "") or "").strip()
+    sendgrid_api_key_mp = str(getattr(settings, "SENDGRID_API_KEY_MP", "") or "").strip()
     
     subject = f"Libro de Reclamaciones INDECOPI - MAXPRO - {ticket_name}"
     body = (
@@ -139,6 +143,10 @@ def send_maxpro_legal_email(ticket_name: str, data: dict, pdf_path: str) -> bool
         f"Saludos,\n"
         f"MAXPRO"
     )
+    
+    if not sendgrid_api_key_mp:
+        logger.error("SENDGRID_API_KEY_MP no configurada — no se pueden enviar correos de MaxPro")
+        return False
     
     # Procesar adjuntos del frontend
     attachments = []
@@ -161,7 +169,8 @@ def send_maxpro_legal_email(ticket_name: str, data: dict, pdf_path: str) -> bool
             pdf_path=pdf_path,
             attachments=attachments if attachments else None,
             cc_receptor=False,
-            from_email_maxpro=mail_username_mp
+            from_email_maxpro=mail_username_mp,
+            api_key_override=sendgrid_api_key_mp,
         ):
             success = False
         logger.info("Correo MaxPro enviado al usuario: %s", user_email)
@@ -177,7 +186,8 @@ def send_maxpro_legal_email(ticket_name: str, data: dict, pdf_path: str) -> bool
             pdf_path=pdf_path,
             attachments=attachments if attachments else None,
             cc_receptor=False,
-            from_email_maxpro=mail_username_mp
+            from_email_maxpro=mail_username_mp,
+            api_key_override=sendgrid_api_key_mp,
         ):
             success = False
         logger.info("Copia de correo MaxPro enviada a: %s", mail_username_mp)
